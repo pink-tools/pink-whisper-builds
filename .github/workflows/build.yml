@@ -1,0 +1,432 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        type: choice
+        description: 'Which job to run'
+        default: 'all'
+        options:
+          - all
+          - macos-coreml
+          - windows-cuda
+          - windows-cpu
+          - linux-cuda
+          - linux-cpu
+
+jobs:
+  build-linux-cpu:
+    if: ${{ inputs.job == 'all' || inputs.job == 'linux-cpu' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+
+      - name: Download pink-whisper.cpp
+        run: |
+          mkdir -p examples/pink-whisper
+          curl -L -o examples/pink-whisper/pink-whisper.cpp \
+            "https://raw.githubusercontent.com/pink-tools/pink-whisper/main/src/pink-whisper.cpp"
+
+      - name: Add to CMake
+        run: |
+          echo 'add_executable(pink-whisper examples/pink-whisper/pink-whisper.cpp)' >> CMakeLists.txt
+          echo 'target_link_libraries(pink-whisper PRIVATE whisper)' >> CMakeLists.txt
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          cmake --build build -j --target pink-whisper
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp build/bin/pink-whisper artifact/
+          chmod +x artifact/pink-whisper
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-cpu
+          path: artifact/
+
+  build-linux-cuda:
+    if: ${{ inputs.job == 'all' || inputs.job == 'linux-cuda' }}
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.6.2-devel-ubuntu24.04
+    steps:
+      - name: Install deps
+        run: apt-get update && apt-get install -y sudo cmake build-essential ninja-build git curl
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 5
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+
+      - name: Download pink-whisper.cpp
+        run: |
+          mkdir -p examples/pink-whisper
+          curl -L -o examples/pink-whisper/pink-whisper.cpp \
+            "https://raw.githubusercontent.com/pink-tools/pink-whisper/main/src/pink-whisper.cpp"
+
+      - name: Add to CMake
+        run: |
+          echo 'add_executable(pink-whisper examples/pink-whisper/pink-whisper.cpp)' >> CMakeLists.txt
+          echo 'target_link_libraries(pink-whisper PRIVATE whisper)' >> CMakeLists.txt
+
+      - name: Build
+        run: |
+          mkdir -p $PWD/buildtmp
+          export TMPDIR=$PWD/buildtmp
+          cmake -B build -G Ninja -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined
+          cmake --build build --target pink-whisper
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp build/bin/pink-whisper artifact/
+          cp /usr/local/cuda/lib64/libcudart.so.12 artifact/
+          cp /usr/local/cuda/lib64/libcublas.so.12 artifact/
+          cp /usr/local/cuda/lib64/libcublasLt.so.12 artifact/
+          chmod +x artifact/pink-whisper
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-cuda
+          path: artifact/
+
+  build-windows-cpu:
+    if: ${{ inputs.job == 'all' || inputs.job == 'windows-cpu' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+
+      - name: Download pink-whisper.cpp
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path examples/pink-whisper
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pink-tools/pink-whisper/main/src/pink-whisper.cpp" `
+            -OutFile examples/pink-whisper/pink-whisper.cpp
+
+      - name: Add to CMake
+        shell: pwsh
+        run: |
+          Add-Content CMakeLists.txt "`nadd_executable(pink-whisper examples/pink-whisper/pink-whisper.cpp)"
+          Add-Content CMakeLists.txt "target_link_libraries(pink-whisper PRIVATE whisper ws2_32)"
+
+      - name: Build
+        run: |
+          cmake -B build -DBUILD_SHARED_LIBS=OFF
+          cmake --build build --config Release --target pink-whisper
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact
+          Copy-Item build/bin/Release/pink-whisper.exe artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64-cpu
+          path: artifact/
+
+  build-windows-cuda:
+    if: ${{ inputs.job == 'all' || inputs.job == 'windows-cuda' }}
+    runs-on: windows-latest
+    env:
+      CUDA_PATH: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+
+      - name: Install tools
+        run: choco install ninja -y
+
+      - name: Download CUDA
+        shell: pwsh
+        run: |
+          $CUDA_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
+          $CUDART = "12.4.127"; $NVCC = "12.4.131"
+          $CUBLAS = "12.4.5.8"; $CCCL = "12.4.127"; $VS = "12.4.127"
+
+          New-Item -ItemType Directory -Force -Path $env:CUDA_PATH
+
+          @(
+            "cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-$CUDART-archive.zip",
+            "cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-$NVCC-archive.zip",
+            "libcublas/windows-x86_64/libcublas-windows-x86_64-$CUBLAS-archive.zip",
+            "cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-$CCCL-archive.zip",
+            "visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-$VS-archive.zip"
+          ) | ForEach-Object {
+            $url = "$CUDA_URL/$_"
+            $file = Split-Path $_ -Leaf
+            Write-Host "Downloading $file..."
+            Invoke-WebRequest -Uri $url -OutFile $file
+          }
+
+          Get-ChildItem *.zip | ForEach-Object {
+            Expand-Archive $_ -DestinationPath $env:CUDA_PATH -Force
+          }
+
+          Get-ChildItem $env:CUDA_PATH -Directory | Where-Object { $_.Name -match '-archive$' } | ForEach-Object {
+            Copy-Item "$($_.FullName)\*" $env:CUDA_PATH -Recurse -Force
+          }
+
+          Copy-Item "$env:CUDA_PATH\visual_studio_integration\MSBuildExtensions\*" `
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\BuildCustomizations" -Force
+
+          "$env:CUDA_PATH\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Download pink-whisper.cpp
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path examples/pink-whisper
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pink-tools/pink-whisper/main/src/pink-whisper.cpp" `
+            -OutFile examples/pink-whisper/pink-whisper.cpp
+
+      - name: Add to CMake
+        shell: pwsh
+        run: |
+          Add-Content CMakeLists.txt "`nadd_executable(pink-whisper examples/pink-whisper/pink-whisper.cpp)"
+          Add-Content CMakeLists.txt "target_link_libraries(pink-whisper PRIVATE whisper ws2_32)"
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -B build -G "Ninja Multi-Config" -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_FLAGS="-diag-suppress 221,177"
+          cmake --build build --config Release --target pink-whisper
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact
+          Copy-Item build/bin/Release/pink-whisper.exe artifact/
+          Copy-Item "$env:CUDA_PATH\bin\cudart64_12.dll" artifact/
+          Copy-Item "$env:CUDA_PATH\bin\cublas64_12.dll" artifact/
+          Copy-Item "$env:CUDA_PATH\bin\cublasLt64_12.dll" artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64-cuda
+          path: artifact/
+
+  build-macos-coreml:
+    if: ${{ inputs.job == 'all' || inputs.job == 'macos-coreml' }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          ~/.local/bin/uv pip install --system torch==2.7.0 ane_transformers openai-whisper coremltools==9.0
+
+      - name: Generate CoreML model
+        run: ./models/generate-coreml-model.sh large-v3
+
+      - name: Download pink-whisper.cpp
+        run: |
+          mkdir -p examples/pink-whisper
+          curl -L -o examples/pink-whisper/pink-whisper.cpp \
+            "https://raw.githubusercontent.com/pink-tools/pink-whisper/main/src/pink-whisper.cpp"
+
+      - name: Add to CMake
+        run: |
+          echo 'add_executable(pink-whisper examples/pink-whisper/pink-whisper.cpp)' >> CMakeLists.txt
+          echo 'target_link_libraries(pink-whisper PRIVATE whisper)' >> CMakeLists.txt
+
+      - name: Build
+        run: |
+          cmake -B build -DWHISPER_COREML=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          cmake --build build -j --target pink-whisper
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp build/bin/pink-whisper artifact/
+          cp -r models/ggml-large-v3-encoder.mlmodelc artifact/
+          chmod +x artifact/pink-whisper
+          codesign -s - --force artifact/pink-whisper
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64-coreml
+          path: artifact/
+
+  test-linux:
+    if: ${{ inputs.job == 'all' || inputs.job == 'linux-cpu' }}
+    needs: build-linux-cpu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64-cpu
+          path: artifact/
+
+      - name: Download model
+        run: curl -L -o artifact/ggml-large-v3.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin
+
+      - name: Test
+        run: |
+          chmod +x artifact/pink-whisper
+          artifact/pink-whisper -m artifact/ggml-large-v3.bin -p 7465 &
+          for i in {1..120}; do nc -z 127.0.0.1 7465 && break; sleep 1; done
+          ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 1 -f s16le -acodec pcm_s16le /tmp/test.pcm -y
+          python3 -c "
+          import socket, struct
+          pcm = open('/tmp/test.pcm', 'rb').read()
+          sock = socket.create_connection(('127.0.0.1', 7465))
+          sock.send(struct.pack('<I', len(pcm)) + pcm)
+          size = struct.unpack('<I', sock.recv(4))[0]
+          text = sock.recv(size).decode()
+          print(f'Transcription: {text}')
+          "
+          pkill pink-whisper || true
+
+  test-windows:
+    if: ${{ inputs.job == 'all' || inputs.job == 'windows-cpu' }}
+    needs: build-windows-cpu
+    runs-on: windows-latest
+    steps:
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-amd64-cpu
+          path: artifact/
+
+      - name: Download model
+        shell: pwsh
+        run: Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin" -OutFile artifact/ggml-large-v3.bin
+
+      - name: Test
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath artifact/pink-whisper.exe -ArgumentList "-m", "artifact/ggml-large-v3.bin", "-p", "7465" -PassThru
+          $connected = $false
+          for ($i = 0; $i -lt 180; $i++) {
+            if ($proc.HasExited) {
+              Write-Host "Server exited with code $($proc.ExitCode)"
+              exit 1
+            }
+            try {
+              $tcp = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 7465)
+              $tcp.Close()
+              $connected = $true
+              Write-Host "Server ready after $i seconds"
+              break
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          if (-not $connected) {
+            Write-Host "Timeout waiting for server"
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 1 -f s16le -acodec pcm_s16le test.pcm -y
+          python -c @"
+          import socket, struct
+          pcm = open('test.pcm', 'rb').read()
+          sock = socket.create_connection(('127.0.0.1', 7465))
+          sock.send(struct.pack('<I', len(pcm)) + pcm)
+          size = struct.unpack('<I', sock.recv(4))[0]
+          text = sock.recv(size).decode()
+          print(f'Transcription: {text}')
+          "@
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+
+  test-macos:
+    if: ${{ inputs.job == 'all' || inputs.job == 'macos-coreml' }}
+    needs: build-macos-coreml
+    runs-on: macos-14
+    steps:
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-arm64-coreml
+          path: artifact/
+
+      - name: Download model
+        run: curl -L -o artifact/ggml-large-v3.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin
+
+      - name: Test
+        run: |
+          chmod +x artifact/pink-whisper
+          artifact/pink-whisper -m artifact/ggml-large-v3.bin -p 7465 &
+          for i in {1..120}; do nc -z 127.0.0.1 7465 && break; sleep 1; done
+          ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 1 -f s16le -acodec pcm_s16le /tmp/test.pcm -y
+          python3 -c "
+          import socket, struct
+          pcm = open('/tmp/test.pcm', 'rb').read()
+          sock = socket.create_connection(('127.0.0.1', 7465))
+          sock.send(struct.pack('<I', len(pcm)) + pcm)
+          size = struct.unpack('<I', sock.recv(4))[0]
+          text = sock.recv(size).decode()
+          print(f'Transcription: {text}')
+          "
+          pkill pink-whisper || true
+
+  release:
+    if: ${{ inputs.job == 'all' }}
+    needs: [build-linux-cuda, build-windows-cuda, test-linux, test-windows, test-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package releases
+        run: |
+          mkdir release
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            echo "Packaging $name..."
+            cd "$name"
+            if [[ "$name" == *"windows"* ]]; then
+              zip -r "../../release/${name}.zip" .
+            else
+              tar -czvf "../../release/${name}.tar.gz" .
+            fi
+            cd ..
+          done
+
+      - name: Delete old release
+        run: gh release delete latest --yes || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/checkout@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: pink-whisper
+          body_path: RELEASE_NOTES.md
+          files: release/*
